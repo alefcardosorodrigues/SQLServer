@@ -21,6 +21,7 @@ BEGIN
     -- Popula a tabela temporária com os arquivos de backup no diretório especificado
     INSERT INTO #BackupList (BackupFile, DatabaseName)
     EXEC xp_cmdshell 'dir /B "E:\BACKUP\"';
+    --EXEC xp_cmdshell 'for %i in ("E:\BACKUP\*") do @echo %~ni'; possibilidade de código para pegar somente o nome da base
 
     -- Loop através dos backups e executa o script de restore
     DECLARE BackupCursor CURSOR FOR
