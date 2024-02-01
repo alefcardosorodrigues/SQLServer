@@ -2,6 +2,7 @@ CREATE PROCEDURE dbo.ManutencaoIndicesPorCategoria
     @Category NVARCHAR(50)
 AS
 BEGIN
+
     -- Tabela temporária para categorizar os bancos de dados
     CREATE TABLE #DatabaseSizes
     (
@@ -15,7 +16,8 @@ BEGIN
 DECLARE databaseCursor CURSOR FOR
     SELECT name
     FROM sys.databases
-    WHERE database_id > 4 -- Excluir bancos de sistema
+    WHERE database_id > 4
+	AND name NOT IN ('MonitoracaoSystemSAT', 'RelatoriosSystemSAT')
 
     -- Abrir o cursor
     OPEN databaseCursor
@@ -54,13 +56,6 @@ END
     CLOSE databaseCursor
     DEALLOCATE databaseCursor
 
-
-
-
-
-
-
-
     -- Tabela temporária para armazenar os resultados finais
     CREATE TABLE #Resultados
     (
@@ -71,7 +66,7 @@ END
     );
 
  -- Loop pelos bancos de dados da categoria especificada
-DECLARE @DatabaseName NVARCHAR(255);
+--DECLARE @DatabaseName NVARCHAR(255);
 DECLARE db_cursor CURSOR FOR
 SELECT DatabaseName
 FROM #DatabaseSizes
@@ -83,77 +78,51 @@ FETCH NEXT FROM db_cursor INTO @DatabaseName;
 WHILE @@FETCH_STATUS = 0
 BEGIN
     DECLARE @SqlStatement NVARCHAR(MAX);
-    DECLARE @SchemaName NVARCHAR(255); -- Adicionado
-    DECLARE @TableName NVARCHAR(255); -- Adicionado
-    DECLARE @IndexName NVARCHAR(255); -- Adicionado
-    DECLARE @FragmentationPercent FLOAT; -- Adicionado
 
-    -- Consulta para obter informações de fragmentação
-    SET @SqlStatement = '
-    USE [' + @DatabaseName + '];
+-- Executa a operação no índice
+DECLARE @InnerSchemaName NVARCHAR(255), @InnerTableName NVARCHAR(255); -- Adicionado
+DECLARE @InnerIndexName NVARCHAR(255); -- Adicionado
+DECLARE @InnerFragmentationPercent FLOAT; -- Adicionado
 
-    INSERT INTO #Resultados (DatabaseName, SchemaName, TableName, FragmentationPercent)
+DECLARE index_cursor CURSOR FOR
     SELECT
-        DB_NAME(database_id) AS DatabaseName,
         s.name AS SchemaName,
         t.name AS TableName,
         i.name AS IndexName,
         ips.avg_fragmentation_in_percent AS FragmentationPercent
-    FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, NULL) ips
-    INNER JOIN sys.indexes i 
-        ON ips.object_id = i.object_id AND ips.index_id = i.index_id
+    FROM sys.indexes i
     INNER JOIN sys.tables t 
         ON i.object_id = t.object_id
     INNER JOIN sys.schemas s 
         ON t.schema_id = s.schema_id
+    INNER JOIN sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, NULL) ips
+        ON i.object_id = ips.object_id AND i.index_id = ips.index_id
     WHERE i.index_id > 0
-        AND ips.avg_fragmentation_in_percent BETWEEN 5 AND 59;
-    ';
+        AND ips.avg_fragmentation_in_percent >= 60;
 
-    -- Executa a consulta
-    EXEC sp_executesql @SqlStatement;
+EXEC sp_executesql @SqlStatement;
 
-    -- Reconstrói ou reorganiza índices com base na fragmentação
-    SET @SqlStatement = '
-    USE [' + @DatabaseName + '];
+-- Executa a operação no índice
+OPEN index_cursor;
+FETCH NEXT FROM index_cursor INTO @InnerSchemaName, @InnerTableName, @InnerIndexName, @InnerFragmentationPercent;
 
-    DECLARE index_cursor CURSOR FOR
-        SELECT
-            s.name AS SchemaName,
-            t.name AS TableName,
-            i.name AS IndexName,
-            ips.avg_fragmentation_in_percent AS FragmentationPercent
-        FROM sys.indexes i
-        INNER JOIN sys.tables t 
-            ON i.object_id = t.object_id
-        INNER JOIN sys.schemas s 
-            ON t.schema_id = s.schema_id
-        INNER JOIN sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, NULL) ips
-            ON i.object_id = ips.object_id AND i.index_id = ips.index_id
-        WHERE i.index_id > 0
-            AND ips.avg_fragmentation_in_percent >= 60;
-    ';
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Reorganize se a fragmentação estiver entre 5 e 59, caso contrário, reconstrua
+    IF @InnerFragmentationPercent BETWEEN 5 AND 59
+        SET @SqlStatement = 'ALTER INDEX [' + @InnerIndexName + '] ON [' + @DatabaseName + '].[' + @InnerSchemaName + '].[' + @InnerTableName + '] REORGANIZE;';
+    ELSE
+        SET @SqlStatement = 'ALTER INDEX [' + @InnerIndexName + '] ON [' + @DatabaseName + '].[' + @InnerSchemaName + '].[' + @InnerTableName + '] REBUILD;';
 
     -- Executa a operação no índice
-    OPEN index_cursor;
-    FETCH NEXT FROM index_cursor INTO @SchemaName, @TableName, @IndexName, @FragmentationPercent;
+    EXEC sp_executesql @SqlStatement;
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        -- Reorganize se a fragmentação estiver entre 5 e 59, caso contrário, reconstrua
-        IF @FragmentationPercent BETWEEN 5 AND 59
-            SET @SqlStatement = 'ALTER INDEX [' + @IndexName + '] ON [' + @DatabaseName + '].[' + @SchemaName + '].[' + @TableName + '] REORGANIZE;';
-        ELSE
-            SET @SqlStatement = 'ALTER INDEX [' + @IndexName + '] ON [' + @DatabaseName + '].[' + @SchemaName + '].[' + @TableName + '] REBUILD;';
+    FETCH NEXT FROM index_cursor INTO @InnerSchemaName, @InnerTableName, @InnerIndexName, @InnerFragmentationPercent;
+END
 
-        -- Executa a operação no índice
-        EXEC sp_executesql @SqlStatement;
+CLOSE index_cursor;
+DEALLOCATE index_cursor;
 
-        FETCH NEXT FROM index_cursor INTO @SchemaName, @TableName, @IndexName, @FragmentationPercent;
-    END
-
-    CLOSE index_cursor;
-    DEALLOCATE index_cursor;
 
     -- Atualiza estatísticas
     SET @SqlStatement = '
